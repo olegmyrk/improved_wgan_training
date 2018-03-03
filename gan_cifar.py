@@ -19,7 +19,7 @@ import tflib.plot
 # Download CIFAR-10 (Python version) at
 # https://www.cs.toronto.edu/~kriz/cifar.html and fill in the path to the
 # extracted files here!
-DATA_DIR = ''
+DATA_DIR = '/app/home/oleg/cifar10/cifar-10-batches-py'
 if len(DATA_DIR) == 0:
     raise Exception('Please specify path to data directory in gan_cifar.py!')
 
@@ -175,7 +175,9 @@ def inf_train_gen():
             yield images
 
 # Train loop
-with tf.Session() as session:
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+with tf.Session(config=config) as session:
     session.run(tf.initialize_all_variables())
     gen = inf_train_gen()
 

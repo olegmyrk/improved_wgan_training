@@ -226,7 +226,9 @@ def inf_train_gen():
             yield dataset
 
 # Train loop!
-with tf.Session() as session:
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+with tf.Session(config=config) as session:
     session.run(tf.initialize_all_variables())
     gen = inf_train_gen()
     for iteration in xrange(ITERS):

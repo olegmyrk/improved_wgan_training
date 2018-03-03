@@ -460,8 +460,7 @@ def DCGANDiscriminator(inputs, dim=DIM, bn=True, nonlinearity=LeakyReLU):
     return tf.reshape(output, [-1])
 
 Generator, Discriminator = GeneratorAndDiscriminator()
-
-with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as session:
+with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options.allow_growth = True)) as session:
 
     all_real_data_conv = tf.placeholder(tf.int32, shape=[BATCH_SIZE, 3, 64, 64])
     if tf.__version__.startswith('1.'):
