@@ -92,7 +92,7 @@ def Generator(n_samples, noise=None):
 
     return output, output_mean, output_scale, eval_fun
 
-def Encoder(output, idx):
+def Encoder(output, idx, bijectorCount=0):
     prefix = 'Encoder' + str(idx)
 
     output = tf.reshape(output, [-1, 1, 28, 28])
@@ -115,17 +115,92 @@ def Encoder(output, idx):
     output = lib.ops.linear.Linear(prefix + '.4', 4*4*4*DIM, DIM, output)
     ouptut = tf.nn.relu(output)
 
-    output_mean = lib.ops.linear.Linear(prefix + '.OutputMean', DIM, 128, output)
-    output_scale = tf.scalar_mul(1e-6 + tf.nn.softplus(lib.param(prefix + ".OutputStdDev", 0, dtype='float32')), tf.ones_like(output_mean))
+    if bijectorCount == 0:
+        output_mean = lib.ops.linear.Linear(prefix + '.OutputMean', DIM, 128, output)
+        output_scale = tf.scalar_mul(1e-6 + tf.nn.softplus(lib.param(prefix + ".OutputStdDev", 0, dtype='float32')), tf.ones_like(output_mean))
 
-    output_distribution = tf.distributions.Normal(name=prefix + '.Noise', loc=output_mean, scale=output_scale)
-    output = output_distribution.sample([])
+        output_distribution = tf.distributions.Normal(name=prefix + '.Noise', loc=output_mean, scale=output_scale)
+        output = output_distribution.sample([])
 
-    eval_fun = lambda value: tf.reduce_sum(output_distribution.log_prob(value), 1)
+        eval_fun = lambda value: tf.reduce_sum(output_distribution.log_prob(value), 1)
 
-    return output, output_mean, output_scale, eval_fun
+        return output, output_mean, output_scale, eval_fun
 
-def Discriminator(inputs):
+    with tf.variable_scope("Encoder", reuse=tf.AUTO_REUSE):
+        bijectors = []
+
+        for i in range(bijectorCount):
+            bijectors.append(
+                    tf.contrib.distributions.bijectors.MaskedAutoregressiveFlow(
+                            shift_and_log_scale_fn=tf.contrib.distributions.bijectors.masked_autoregressive_default_template(
+                                hidden_layers=[128, 128],
+                                name=prefix + ".MAFBijector." + str(i) + ".Template"
+                            )
+                    )
+                )
+    
+            random_permutation = tf.get_variable(
+                                            prefix + ".MAFBijector." + str(i) + ".RandomPermutation", 
+                                            initializer=np.random.permutation(128), 
+                                            trainable=False,
+                                            dtype=tf.int64
+                                        )
+            bijectors.append(
+                    tf.contrib.distributions.bijectors.Permute(
+                        permutation=random_permutation,
+                        name=prefix + ".PermuteBijector." + str(i), 
+                    )
+                )
+                
+        flow_bijector = tf.contrib.distributions.bijectors.Chain(list(reversed(bijectors[:-1])))
+        distribution = tf.contrib.distributions.TransformedDistribution(
+                            name=prefix + ".FlowBijector",
+                            distribution=tf.contrib.distributions.MultivariateNormalDiag(lib.ops.linear.Linear(prefix + '.FloatInputMean', DIM, 128, output)),
+                            bijector = flow_bijector
+                        )
+
+        return distribution.sample(), tf.zeros_like([BATCH_SIZE, 128]), tf.zeros([BATCH_SIZE, 128]), lambda value: distribution.log_prob(value)
+
+def DiscriminatorMAF(inputs, bijectorCount):
+    with tf.variable_scope("Discriminator", reuse=tf.AUTO_REUSE):
+        bijectors = []
+
+        for i in range(bijectorCount):
+            bijectors.append(
+                    tf.contrib.distributions.bijectors.MaskedAutoregressiveFlow(
+                            shift_and_log_scale_fn=tf.contrib.distributions.bijectors.masked_autoregressive_default_template(
+                                hidden_layers=[OUTPUT_DIM, OUTPUT_DIM],
+                                name="Discriminator.MAFBijector." + str(i) + ".Template"
+                            )
+                    )
+                )
+    
+            random_permutation = tf.get_variable(
+                                            'Discriminator.MAFBijector.' + str(i) + ".RandomPermutation", 
+                                            initializer=np.random.permutation(OUTPUT_DIM), 
+                                            trainable=False,
+                                            dtype=tf.int64
+                                        )
+            bijectors.append(
+                    tf.contrib.distributions.bijectors.Permute(
+                        permutation=random_permutation,
+                        name='Discriminator.PermuteBijector.' + str(i), 
+                    )
+                )
+                
+        flow_bijector = tf.contrib.distributions.bijectors.Chain(list(reversed(bijectors[:-1])))
+        distribution = tf.contrib.distributions.TransformedDistribution(
+                            name="Discriminator.FlowBijector",
+                            distribution=tf.contrib.distributions.MultivariateNormalDiag(tf.zeros(OUTPUT_DIM)),
+                            bijector = flow_bijector
+                        )
+
+        print tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+        print distribution.sample([BATCH_SIZE]).shape, distribution.log_prob(inputs)
+
+        return distribution.log_prob(inputs)
+
+def DiscriminatorBasic(inputs):
     output = tf.reshape(inputs, [-1, 1, 28, 28])
 
     output = lib.ops.conv2d.Conv2D('Discriminator.1',1,DIM,5,output,stride=2)
@@ -142,9 +217,23 @@ def Discriminator(inputs):
     output = LeakyReLU(output)
 
     output = tf.reshape(output, [-1, 4*4*4*DIM])
+    
     output = lib.ops.linear.Linear('Discriminator.Output', 4*4*4*DIM, 1, output)
-
+    
     return tf.reshape(output, [-1])
+
+    #output = lib.ops.linear.Linear('Discrimator.4', 4*4*4*DIM, DIM, output)
+    #ouptut = tf.nn.relu(output)
+
+    #output_mean = lib.ops.linear.Linear('Discriminator.OutputMean', DIM, 128, output)
+    #output_scale = tf.scalar_mul(1e-6 + tf.nn.softplus(lib.param("Discriminator.OutputStdDev", 0, dtype='float32')), tf.ones_like(output_mean))
+
+    #output_distribution = tf.distributions.Normal(name='Discriminator.Noise', loc=output_mean, scale=output_scale)
+
+    #eval_fun = lambda value: tf.reduce_sum(output_distribution.log_prob(value), 1)
+    #output = eval_fun(tf.zeros_like(output_mean))
+
+    #return tf.reshape(output, [-1]), output_mean, output_scale
 
 
 real_data = tf.placeholder(tf.float32, shape=[BATCH_SIZE, OUTPUT_DIM])
@@ -153,24 +242,28 @@ fake_noise = fake_noise_distribution.sample([BATCH_SIZE])
 fake_gen, fake_gen_mean, fake_gen_scale, fake_gen_eval_fun = Generator(BATCH_SIZE, fake_noise)
 fake_data = fake_gen
 
-enc1_idx = 1
-fake_enc1, fake_enc1_mean, fake_enc1_scale, fake_enc1_eval_fun = Encoder(fake_data, idx=enc1_idx)
+encoderBijectorCount=0
 
-enc2_idx = 1
-fake_enc2, fake_enc2_mean, fake_enc2_scale, fake_enc2_eval_fun = Encoder(real_data, idx=enc2_idx)
+enc1_idx = 1
+fake_enc1, fake_enc1_mean, fake_enc1_scale, fake_enc1_eval_fun = Encoder(fake_data, idx=enc1_idx, bijectorCount=encoderBijectorCount)
+
+enc2_idx = 2
+fake_enc2, fake_enc2_mean, fake_enc2_scale, fake_enc2_eval_fun = Encoder(real_data, idx=enc2_idx, bijectorCount=encoderBijectorCount)
 fake_enc2_gen, fake_enc2_gen_mean, fake_enc2_gen_scale, fake_enc2_gen_eval_fun = Generator(BATCH_SIZE, fake_enc2)
 
-disc_real = Discriminator(real_data)
-disc_fake = Discriminator(fake_data)
+#disc_real, disc_real_mean, disc_real_scale = Discriminator(real_data)
+disc_real = DiscriminatorBasic(real_data)
+#disc_fake, disc_fake_mean, disc_fake_scale = Discriminator(fake_data)
+disc_fake = DiscriminatorBasic(fake_data)
 
-gen_params = lib.params_with_name('Generator')
-enc1_params = lib.params_with_name('Encoder' + str(enc1_idx))
-enc2_params = lib.params_with_name('Encoder' + str(enc2_idx))
-disc_params = lib.params_with_name('Discriminator')
+gen_params = filter(lambda var: var.name.startswith('Generator'), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
+enc1_params = filter(lambda var: var.name.startswith('Encoder' + str(enc1_idx)), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
+enc2_params = filter(lambda var: var.name.startswith('Encoder' + str(enc2_idx)), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
+disc_params = filter(lambda var: var.name.startswith("Discriminator"), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
 
 if MODE == 'wgan':
     gen_cost = -tf.reduce_mean(disc_fake)
-    disc_cost = tf.reduce_mean(disc_fake) - tf.reduce_mean(disc_real)
+    disc_cost = -tf.reduce_mean(disc_fake) - tf.reduce_mean(disc_real)
 
     gen_train_op = tf.train.RMSPropOptimizer(
         learning_rate=5e-5
@@ -201,9 +294,10 @@ elif MODE == 'wgan-gp':
     )
     differences = fake_data - real_data
     interpolates = real_data + (alpha*differences)
-    gradients = tf.gradients(Discriminator(interpolates), [interpolates])[0]
+    gradients = tf.gradients(DiscriminatorBasic(interpolates), [interpolates])[0]
     slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1]))
-    gradient_penalty = tf.reduce_mean((tf.maximum(tf.zeros_like(slopes),slopes-OUTPUT_DIM/10))**2)
+    #gradient_penalty = tf.reduce_mean((tf.maximum(tf.zeros_like(slopes),slopes-OUTPUT_DIM/10))**2)
+    gradient_penalty = tf.reduce_mean((slopes-1)**2)
     disc_regularization_wgan = LAMBDA*gradient_penalty
 
     entropy_lower = -tf.reduce_mean(
@@ -219,13 +313,14 @@ elif MODE == 'wgan-gp':
                         )
 
     wgan_steps = 0
-    CRITIC_ITERS=1
+    CRITIC_ITERS=5
     
     global_step = tf.Variable(0, trainable=False, name='global_step')
 
-    disc_regularization_final = disc_regularization_wgan
+    #disc_regularization_final = tf.constant(0.0)
     #disc_regularization_final = .01*tf.reduce_mean(disc_fake**2) + tf.reduce_mean(disc_real**2)
     #disc_regularization_final = 10*tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [V for V in disc_params if len(V.shape) > 1])
+    disc_regularization_final = disc_regularization_wgan
     disc_cost += tf.cond(tf.less(global_step, wgan_steps), lambda: disc_regularization_wgan, lambda: disc_regularization_final)
 
     gen_regularization_final = tf.reduce_mean(-fake_enc1_eval_fun(fake_noise))
@@ -286,8 +381,8 @@ elif MODE == 'dcgan':
 # For saving samples
 fixed_noise = tf.constant(np.random.normal(size=(128, 128)).astype('float32'))
 fixed_noise_samples = Generator(128, noise=fixed_noise)[1]
-fixed_noise_samples_enc1_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc1_idx)[0])[1]
-fixed_noise_samples_enc2_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc2_idx)[0])[1]
+fixed_noise_samples_enc1_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc1_idx, bijectorCount=encoderBijectorCount)[0])[1]
+fixed_noise_samples_enc2_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc2_idx, bijectorCount=encoderBijectorCount)[0])[1]
 def generate_image(frame, true_dist):
     samples = session.run(fixed_noise_samples)
     lib.save_images.save_images(
