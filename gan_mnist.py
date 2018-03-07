@@ -242,19 +242,20 @@ fake_noise = fake_noise_distribution.sample([BATCH_SIZE])
 fake_gen, fake_gen_mean, fake_gen_scale, fake_gen_eval_fun = Generator(BATCH_SIZE, fake_noise)
 fake_data = fake_gen
 
-encoderBijectorCount=0
+#EncoderFun = lambda data, idx: Encoder(data, idx, bijectorCount=3) 
+EncoderFun = lambda data, idx: Encoder(data, idx, bijectorCount=0) 
+#DiscriminatorFun = lambda data: DiscriminatorMAF(data, bijectorCount=3)
+DiscriminatorFun = lambda data: DiscriminatorBasic(data)
 
 enc1_idx = 1
-fake_enc1, fake_enc1_mean, fake_enc1_scale, fake_enc1_eval_fun = Encoder(fake_data, idx=enc1_idx, bijectorCount=encoderBijectorCount)
+fake_enc1, fake_enc1_mean, fake_enc1_scale, fake_enc1_eval_fun = EncoderFun(fake_data, enc1_idx)
 
 enc2_idx = 2
-fake_enc2, fake_enc2_mean, fake_enc2_scale, fake_enc2_eval_fun = Encoder(real_data, idx=enc2_idx, bijectorCount=encoderBijectorCount)
+fake_enc2, fake_enc2_mean, fake_enc2_scale, fake_enc2_eval_fun = EncoderFun(fake_data, enc2_idx)
 fake_enc2_gen, fake_enc2_gen_mean, fake_enc2_gen_scale, fake_enc2_gen_eval_fun = Generator(BATCH_SIZE, fake_enc2)
 
-#disc_real, disc_real_mean, disc_real_scale = Discriminator(real_data)
-disc_real = DiscriminatorBasic(real_data)
-#disc_fake, disc_fake_mean, disc_fake_scale = Discriminator(fake_data)
-disc_fake = DiscriminatorBasic(fake_data)
+disc_real = DiscriminatorFun(real_data)
+disc_fake = DiscriminatorFun(fake_data)
 
 gen_params = filter(lambda var: var.name.startswith('Generator'), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
 enc1_params = filter(lambda var: var.name.startswith('Encoder' + str(enc1_idx)), tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES))
@@ -294,7 +295,7 @@ elif MODE == 'wgan-gp':
     )
     differences = fake_data - real_data
     interpolates = real_data + (alpha*differences)
-    gradients = tf.gradients(DiscriminatorBasic(interpolates), [interpolates])[0]
+    gradients = tf.gradients(DiscriminatorFun(interpolates), [interpolates])[0]
     slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1]))
     #gradient_penalty = tf.reduce_mean((tf.maximum(tf.zeros_like(slopes),slopes-OUTPUT_DIM/10))**2)
     gradient_penalty = tf.reduce_mean((slopes-1)**2)
@@ -307,13 +308,13 @@ elif MODE == 'wgan-gp':
                         )
 
     entropy_upper = -tf.reduce_mean(
-                            fake_enc2_gen_eval_fun(real_data) 
+                            fake_enc2_gen_eval_fun(fake_data) 
                             + tf.reduce_sum(fake_noise_distribution.log_prob(fake_enc2),1) #- 0.5 * tf.reduce_sum(fake_enc2**2,1)
                             - fake_enc2_eval_fun(fake_enc2)
                         )
 
     wgan_steps = 0
-    CRITIC_ITERS=5
+    #CRITIC_ITERS=1
     
     global_step = tf.Variable(0, trainable=False, name='global_step')
 
@@ -323,7 +324,7 @@ elif MODE == 'wgan-gp':
     disc_regularization_final = disc_regularization_wgan
     disc_cost += tf.cond(tf.less(global_step, wgan_steps), lambda: disc_regularization_wgan, lambda: disc_regularization_final)
 
-    gen_regularization_final = tf.reduce_mean(-fake_enc1_eval_fun(fake_noise))
+    gen_regularization_final = -entropy_lower #tf.reduce_mean(-fake_enc1_eval_fun(fake_noise))
     gen_cost += tf.cond(tf.less(global_step, wgan_steps), lambda: tf.constant(0.0), lambda: gen_regularization_final)
     
     enc_cost = entropy_upper - entropy_lower
@@ -381,8 +382,8 @@ elif MODE == 'dcgan':
 # For saving samples
 fixed_noise = tf.constant(np.random.normal(size=(128, 128)).astype('float32'))
 fixed_noise_samples = Generator(128, noise=fixed_noise)[1]
-fixed_noise_samples_enc1_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc1_idx, bijectorCount=encoderBijectorCount)[0])[1]
-fixed_noise_samples_enc2_gen = Generator(128,Encoder(fixed_noise_samples, idx=enc2_idx, bijectorCount=encoderBijectorCount)[0])[1]
+fixed_noise_samples_enc1_gen = Generator(128,EncoderFun(fixed_noise_samples, enc1_idx)[0])[1]
+fixed_noise_samples_enc2_gen = Generator(128,EncoderFun(fixed_noise_samples, enc2_idx)[0])[1]
 def generate_image(frame, true_dist):
     samples = session.run(fixed_noise_samples)
     lib.save_images.save_images(
