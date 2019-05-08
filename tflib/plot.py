@@ -36,6 +36,8 @@ def flush():
 
 	print "iter {}\t{}".format(_iter[0], "\t".join(prints))
 	_since_last_flush.clear()
+        import sys
+        sys.stdout.flush()
 
 	with open('log.pkl', 'wb') as f:
 		pickle.dump(dict(_since_beginning), f, pickle.HIGHEST_PROTOCOL)
