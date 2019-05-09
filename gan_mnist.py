@@ -22,8 +22,9 @@ import tflib.plot
 MODE = 'wgan-gp' # dcgan, wgan, or wgan-gp
 DIM = 64 # Model dimensionality
 BATCH_SIZE = 50 # Batch size
-CRITIC_ITERS = 5 # For WGAN and WGAN-GP, number of critic iters per gen iter
-LAMBDA = 10 # Gradient penalty lambda hyperparameter
+GENERATOR_ITERS = 10
+CRITIC_ITERS = 1 # For WGAN and WGAN-GP, number of critic iters per gen iter
+LAMBDA = 1 # Gradient penalty lambda hyperparameter
 ITERS = 200000 # How many generator iterations to train for 
 OUTPUT_DIM = 784 # Number of pixels in MNIST (28*28)
 
@@ -101,7 +102,8 @@ def Discriminator(inputs):
     return tf.reshape(output, [-1])
 
 real_data = tf.placeholder(tf.float32, shape=[BATCH_SIZE, OUTPUT_DIM])
-fake_data = Generator(BATCH_SIZE)
+fake_noise = tf.random_normal([BATCH_SIZE, 128])
+fake_data = Generator(BATCH_SIZE, fake_noise)
 
 disc_real = Discriminator(real_data)
 disc_fake = Discriminator(fake_data)
@@ -145,13 +147,21 @@ elif MODE == 'wgan-gp':
     gradients = tf.gradients(Discriminator(interpolates), [interpolates])[0]
     slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1]))
     gradient_penalty = tf.reduce_mean((slopes-1.)**2)
-    disc_cost += LAMBDA*gradient_penalty
+    #disc_cost += LAMBDA*gradient_penalty
+    disc_reg = -tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [V for V in disc_params if len(V.shape) > 1])
+    disc_reg_cost = disc_cost + disc_reg
+
+    random_directions = tf.math.l2_normalize(tf.random_normal([BATCH_SIZE, 128]), axis=1)
+    from tensorflow.contrib.nn.python.ops import fwd_gradients
+    direction_gradients = fwd_gradients.fwd_gradients([Generator(BATCH_SIZE, fake_noise)], [fake_noise], [random_directions])[0]
+    gen_reg = -tf.reduce_mean(tf.math.log(1e-3 + tf.norm(direction_gradients, axis=1)))
+    gen_reg_cost = gen_cost + gen_reg
 
     gen_train_op = tf.train.AdamOptimizer(
         learning_rate=1e-4, 
         beta1=0.5,
         beta2=0.9
-    ).minimize(gen_cost, var_list=gen_params)
+    ).minimize(gen_reg_cost, var_list=gen_params)
     disc_train_op = tf.train.AdamOptimizer(
         learning_rate=1e-4, 
         beta1=0.5, 
@@ -206,7 +216,6 @@ def inf_train_gen():
 
 # Train loop
 with tf.Session() as session:
-
     session.run(tf.initialize_all_variables())
 
     gen = inf_train_gen()
@@ -215,7 +224,10 @@ with tf.Session() as session:
         start_time = time.time()
 
         if iteration > 0:
-            _ = session.run(gen_train_op)
+            for i in xrange(GENERATOR_ITERS):
+                _gen_cost, _gen_reg, _gen_reg_cost, _  = session.run([gen_cost, gen_reg, gen_reg_cost, gen_train_op])
+        else:
+            _gen_cost, _gen_reg, _gen_reg_cost  = session.run([gen_cost, gen_reg, gen_reg_cost])
 
         if MODE == 'dcgan':
             disc_iters = 1
@@ -223,14 +235,19 @@ with tf.Session() as session:
             disc_iters = CRITIC_ITERS
         for i in xrange(disc_iters):
             _data = gen.next()
-            _disc_cost, _ = session.run(
-                [disc_cost, disc_train_op],
+            _disc_cost, _disc_reg, _disc_reg_cost, _ = session.run(
+                [disc_cost, disc_reg, disc_reg_cost, disc_train_op],
                 feed_dict={real_data: _data}
             )
             if clip_disc_weights is not None:
                 _ = session.run(clip_disc_weights)
 
+        lib.plot.plot('train gen cost', _gen_cost)
+        lib.plot.plot('train gen reg', _gen_reg)
+        lib.plot.plot('train gen reg cost', _gen_reg_cost)
         lib.plot.plot('train disc cost', _disc_cost)
+        lib.plot.plot('train disc reg', _disc_reg)
+        lib.plot.plot('train disc reg cost', _disc_reg_cost)
         lib.plot.plot('time', time.time() - start_time)
 
         # Calculate dev loss and generate samples every 100 iters
