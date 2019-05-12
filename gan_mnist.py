@@ -22,13 +22,16 @@ import tflib.plot
 MODE = 'wgan-gp' # dcgan, wgan, or wgan-gp
 DIM = 64 # Model dimensionality
 BATCH_SIZE = 50 # Batch size
-GENERATOR_ITERS = 10
+GENERATOR_ITERS = 1
 CRITIC_ITERS = 1 # For WGAN and WGAN-GP, number of critic iters per gen iter
 LAMBDA = 1 # Gradient penalty lambda hyperparameter
 ITERS = 200000 # How many generator iterations to train for 
 OUTPUT_DIM = 784 # Number of pixels in MNIST (28*28)
 
 lib.print_model_settings(locals().copy())
+
+def Swish(x):
+    return x*tf.nn.sigmoid(x)
 
 def LeakyReLU(x, alpha=0.2):
     return tf.maximum(alpha*x, x)
@@ -80,21 +83,30 @@ def Generator(n_samples, noise=None):
 
     return tf.reshape(output, [-1, OUTPUT_DIM])
 
-def Discriminator(inputs):
+def Discriminator(inputs, use_swish=False, spectralnorm=1):
     output = tf.reshape(inputs, [-1, 1, 28, 28])
 
-    output = lib.ops.conv2d.Conv2D('Discriminator.1',1,DIM,5,output,stride=2)
-    output = LeakyReLU(output)
+    output = lib.ops.conv2d.Conv2D('Discriminator.1',1,DIM,5,output,stride=2, spectralnorm=spectralnorm)
+    if use_wish:
+        output = Swish(output)
+    else:
+        output = LeakyReLU(output)
 
-    output = lib.ops.conv2d.Conv2D('Discriminator.2', DIM, 2*DIM, 5, output, stride=2)
+    output = lib.ops.conv2d.Conv2D('Discriminator.2', DIM, 2*DIM, 5, output, stride=2, spectralnorm=spectralnorm)
     if MODE == 'wgan':
         output = lib.ops.batchnorm.Batchnorm('Discriminator.BN2', [0,2,3], output)
-    output = LeakyReLU(output)
+    if use_swish:
+        output = Swish(output)
+    else:
+        output = LeakyReLU(output)
 
-    output = lib.ops.conv2d.Conv2D('Discriminator.3', 2*DIM, 4*DIM, 5, output, stride=2)
+    output = lib.ops.conv2d.Conv2D('Discriminator.3', 2*DIM, 4*DIM, 5, output, stride=2, spectralnorm=spectralnorm)
     if MODE == 'wgan':
         output = lib.ops.batchnorm.Batchnorm('Discriminator.BN3', [0,2,3], output)
-    output = LeakyReLU(output)
+    if use_swish:
+        output = Swish(output)
+    else:
+        output = LeakyReLU(output)
 
     output = tf.reshape(output, [-1, 4*4*4*DIM])
     output = lib.ops.linear.Linear('Discriminator.Output', 4*4*4*DIM, 1, output)
@@ -145,16 +157,23 @@ elif MODE == 'wgan-gp':
     differences = fake_data - real_data
     interpolates = real_data + (alpha*differences)
     gradients = tf.gradients(Discriminator(interpolates), [interpolates])[0]
-    slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1]))
-    gradient_penalty = tf.reduce_mean((slopes-1.)**2)
-    #disc_cost += LAMBDA*gradient_penalty
-    disc_reg = -tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [V for V in disc_params if len(V.shape) > 1])
+    #slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1]))
+    disc_random_directions = tf.math.l2_normalize(tf.random_normal([BATCH_SIZE, OUTPUT_DIM]), axis=1)
+    from tensorflow.contrib.nn.python.ops import fwd_gradients
+    disc_direction_gradients = fwd_gradients.fwd_gradients([gradients], [interpolates], [disc_random_directions])[0]
+    disc_reg = tf.zeros(BATCH_SIZE)
+    #disc_reg += LAMBDA*tf.reduce_mean((slopes-1.)**2)
+    #disc_reg += LAMBDA*tf.reduce_mean(slopes)
+    #disc_reg += 0.1*tf.reduce_mean(tf.math.log(1e-3 + tf.norm(disc_direction_gradients, axis=1)))
+    #disc_reg += 0.00001*tf.contrib.layers.apply_regularization(tf.contrib.layers.l2_regularizer(1.0), [V for V in disc_params if len(V.shape) > 1])
+    #disc_reg += .01*(tf.reduce_mean(disc_fake**2) + tf.reduce_mean(disc_real**2))
     disc_reg_cost = disc_cost + disc_reg
 
-    random_directions = tf.math.l2_normalize(tf.random_normal([BATCH_SIZE, 128]), axis=1)
+    gen_random_directions = tf.math.l2_normalize(tf.random_normal([BATCH_SIZE, 128]), axis=1)
     from tensorflow.contrib.nn.python.ops import fwd_gradients
-    direction_gradients = fwd_gradients.fwd_gradients([Generator(BATCH_SIZE, fake_noise)], [fake_noise], [random_directions])[0]
-    gen_reg = -tf.reduce_mean(tf.math.log(1e-3 + tf.norm(direction_gradients, axis=1)))
+    gen_direction_gradients = fwd_gradients.fwd_gradients([Generator(BATCH_SIZE, fake_noise)], [fake_noise], [gen_random_directions])[0]
+    gen_reg = tf.zeros(BATCH_SIZE)
+    gen_reg += -tf.reduce_mean(tf.math.log(1e-3 + tf.norm(gen_direction_gradients, axis=1)))
     gen_reg_cost = gen_cost + gen_reg
 
     gen_train_op = tf.train.AdamOptimizer(
@@ -166,7 +185,7 @@ elif MODE == 'wgan-gp':
         learning_rate=1e-4, 
         beta1=0.5, 
         beta2=0.9
-    ).minimize(disc_cost, var_list=disc_params)
+    ).minimize(disc_reg_cost, var_list=disc_params)
 
     clip_disc_weights = None
 
@@ -215,7 +234,9 @@ def inf_train_gen():
             yield images
 
 # Train loop
-with tf.Session() as session:
+config = tf.ConfigProto()
+config.gpu_options.allow_growth=True
+with tf.Session(config=config) as session:
     session.run(tf.initialize_all_variables())
 
     gen = inf_train_gen()

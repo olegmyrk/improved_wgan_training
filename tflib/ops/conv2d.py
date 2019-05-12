@@ -17,7 +17,38 @@ def unset_weights_stdev():
     global _weights_stdev
     _weights_stdev = None
 
-def Conv2D(name, input_dim, output_dim, filter_size, inputs, he_init=True, mask_type=None, stride=1, weightnorm=None, biases=True, gain=1.):
+def spectral_norm(w, name, iteration=1):
+   w_shape = w.shape.as_list()
+   w = tf.reshape(w, [-1, w_shape[-1]])
+
+   u = lib.param(name + ".SpectralU", initial_value=tf.random.normal(shape=[1, w_shape[-1]]), trainable=False)
+
+   u_hat = u
+   v_hat = None
+   for i in range(iteration):
+       """
+       power iteration
+       Usually iteration = 1 will be enough
+       """
+       v_ = tf.matmul(u_hat, tf.transpose(w))
+       v_hat = tf.nn.l2_normalize(v_)
+
+       u_ = tf.matmul(v_hat, w)
+       u_hat = tf.nn.l2_normalize(u_)
+
+   u_hat = tf.stop_gradient(u_hat)
+   v_hat = tf.stop_gradient(v_hat)
+
+   sigma = tf.matmul(tf.matmul(v_hat, w), tf.transpose(u_hat))
+
+   with tf.control_dependencies([u.assign(u_hat)]):
+       w_norm = w / sigma
+       w_norm = tf.reshape(w_norm, w_shape)
+
+
+   return w_norm
+
+def Conv2D(name, input_dim, output_dim, filter_size, inputs, he_init=True, mask_type=None, stride=1, weightnorm=None, spectralnorm=None, biases=True, gain=1.):
     """
     inputs: tensor of shape (batch size, num channels, height, width)
     mask_type: one of None, 'a', 'b'
@@ -98,6 +129,9 @@ def Conv2D(name, input_dim, output_dim, filter_size, inputs, he_init=True, mask_
             with tf.name_scope('weightnorm') as scope:
                 norms = tf.sqrt(tf.reduce_sum(tf.square(filters), reduction_indices=[0,1,2]))
                 filters = filters * (target_norms / norms)
+
+        if spectralnorm:
+            filters = spectral_norm(filters, name, iteration=spectralnorm)
 
         if mask_type is not None:
             with tf.name_scope('filter_mask'):
